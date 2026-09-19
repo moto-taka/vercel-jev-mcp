@@ -128,7 +128,7 @@ test('authenticated GET/DELETE have no persistent SSE or session', async () => {
     assert.equal(response.headers.get('allow'), 'POST');
   }
 });
-test('real SDK sends one batched Gateway evaluation call, with isolated BYOK', async () => {
+test('real SDK sends one batched Gateway evaluation call, with isolated optional BYOK', async () => {
   const mock = standIn();
   const input = {
     state: { task: 'Find the form', elements: ['form', 'footer'] },
@@ -169,14 +169,15 @@ for (const [name, args, type] of [
   ['jev_classify', { instructions: 'Choose', criteria: { yes: 'visible', no: 'not visible' } }, 'choice'],
   ['jev_score', { instructions: 'Rate', criteria: ['low', 'high'] }, 'score'],
 ] as const) {
-  test(`${name} is a transparent single-question wrapper`, async () => {
+  test(`${name} is a transparent single-question wrapper without a Jev key`, async () => {
     const mock = standIn();
-    const response = await createApp(env, mock).fetch(httpRequest(rpc('tools/call', {
+    const response = await createApp({ ...env, JEV_API_KEY: undefined }, mock).fetch(httpRequest(rpc('tools/call', {
       name, arguments: { state: 'Visible', ...args },
     })));
     const payload = await readRpc(response);
     assert.equal(payload.result.isError, undefined);
     assert.deepEqual(mock.calls[0]!.body.questions, { result: { type, ...args } });
+    assert.deepEqual(mock.calls[0]!.body.providerOptions.gateway, { only: ['typesafe-ai'] });
     assert.equal(payload.result.structuredContent.answers.result.type, type);
   });
 }
@@ -218,9 +219,30 @@ test('provider errors are sanitized, do not retry and do not leak secrets', asyn
   assert.ok(!serialized.includes(env.AI_GATEWAY_API_KEY!));
   assert.ok(!serialized.includes('private state'));
 });
-test('missing Jev key fails without Gateway I/O, never falls back to direct TypeSafe', async () => {
+for (const [label, jevKey] of [['unset', undefined], ['empty', ''], ['whitespace', '   ']] as const) {
+  test(`${label} Jev key uses Gateway-managed credentials without BYOK`, async () => {
+    const mock = standIn();
+    const response = await createApp({ ...env, JEV_API_KEY: jevKey }, mock).fetch(httpRequest(rpc('tools/call', { name: 'jev_ask', arguments: example })));
+    assert.equal(response.status, 200);
+    const payload = await readRpc(response);
+    assert.equal(payload.result.isError, undefined);
+    assert.equal(payload.result.structuredContent.answers.visible.probability, 0.9);
+    assert.equal(mock.calls.length, 1);
+    const call = mock.calls[0]!;
+    assert.match(call.url, /^https:\/\/ai-gateway\.vercel\.sh\/.*evaluation-model$/);
+    assert.equal(call.headers.get('authorization'), `Bearer ${env.AI_GATEWAY_API_KEY}`);
+    assert.equal(call.headers.get('ai-model-id'), MODEL);
+    assert.deepEqual(call.body.state, example.state);
+    assert.deepEqual(call.body.questions, example.questions);
+    assert.deepEqual(call.body.providerOptions.gateway, { only: ['typesafe-ai'] });
+    assert.equal(Object.hasOwn(call.body.providerOptions.gateway, 'byok'), false);
+    assert.ok(!JSON.stringify(payload).includes(env.AI_GATEWAY_API_KEY!));
+    assert.ok(!JSON.stringify(call.body).includes(token));
+  });
+}
+test('a Jev BYOK key cannot replace Gateway authentication outside Vercel', async () => {
   const mock = standIn();
-  const response = await createApp({ ...env, JEV_API_KEY: '' }, mock).fetch(httpRequest(rpc('tools/call', { name: 'jev_ask', arguments: example })));
+  const response = await createApp({ ...env, AI_GATEWAY_API_KEY: '', VERCEL: undefined }, mock).fetch(httpRequest(rpc('tools/call', { name: 'jev_ask', arguments: example })));
   const payload = await readRpc(response);
   assert.equal(payload.result.isError, true);
   assert.equal(payload.result.structuredContent.error.kind, 'configuration');
@@ -239,14 +261,15 @@ test('deadlines cancel the real SDK request', async () => {
     await assert.rejects(createJevService({ ...env, JEV_TIMEOUT_MS: '1000' }, { fetch }).ask(example));
   } finally { clearInterval(keepAlive); }
 });
-test('REST uses the same protected pass-through service', async () => {
+test('REST uses the same protected pass-through service without a Jev key', async () => {
   const mock = standIn();
-  const app = createApp(env, mock);
+  const app = createApp({ ...env, JEV_API_KEY: undefined }, mock);
   assert.equal((await app.fetch(httpRequest(example, { path: '/v1/evaluate', authenticated: false }))).status, 401);
   const response = await app.fetch(httpRequest(example, { path: '/v1/evaluate' }));
   assert.equal(response.status, 200);
   assert.equal((await response.json() as any).answers.visible.probability, 0.9);
   assert.equal(mock.calls.length, 1);
+  assert.deepEqual(mock.calls[0]!.body.providerOptions.gateway, { only: ['typesafe-ai'] });
 });
 test('simultaneous requests with identical RPC IDs do not share task state', async () => {
   const mock = standIn();

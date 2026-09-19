@@ -38,7 +38,7 @@ export function safeError(error: unknown) {
       : status === 429 ? 'rate_limit' : status === 400 || status === 422 ? 'invalid_request' : 'upstream_error',
     retryable: status === 408 || status === 429 || status === undefined || status >= 500,
     message: status === 401 || status === 403
-      ? 'Check the server-side AI Gateway and Jev credentials.' : 'AI Gateway evaluation failed.',
+      ? 'Check AI Gateway authentication and any explicitly configured BYOK credentials.' : 'AI Gateway evaluation failed.',
     ...(status === undefined ? {} : { status }),
   };
 }
@@ -52,8 +52,8 @@ export function createJevService(env: Environment, options: { fetch?: FetchFunct
       if (Buffer.byteLength(JSON.stringify(input), 'utf8') > 240 * 1024) {
         throw new JevFailure('invalid_request', false, 'Evaluation input exceeds the 240 KiB limit.');
       }
+      // Gateway-managed credentials are the default. A Jev key is optional BYOK only.
       const apiKey = env.JEV_API_KEY?.trim();
-      if (!apiKey) throw new JevFailure('configuration', false, 'Set JEV_API_KEY on the server.');
       const gatewayKey = env.AI_GATEWAY_API_KEY?.trim();
       if (!gatewayKey && !env.VERCEL) {
         throw new JevFailure('configuration', false, 'Set AI_GATEWAY_API_KEY, or use Vercel OIDC on Vercel.');
@@ -79,7 +79,7 @@ export function createJevService(env: Environment, options: { fetch?: FetchFunct
         providerOptions: {
           gateway: {
             only: ['typesafe-ai'],
-            byok: { 'typesafe-ai': [{ apiKey }] },
+            ...(apiKey ? { byok: { 'typesafe-ai': [{ apiKey }] } } : {}),
           },
         },
       });
